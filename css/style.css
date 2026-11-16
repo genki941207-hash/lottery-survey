@@ -69,6 +69,11 @@ h2 { font-size: 20px; line-height: 1.45; margin: 0 0 14px; }
 
 .demo-banner { background: #eef2fa; border: 1px dashed var(--series); color: var(--ink-2); border-radius: 10px; padding: 8px 12px; font-size: 12px; margin-bottom: 14px; }
 
+.demo-banner.warn { background: #fdecea; border-color: var(--accent); }
+
+.prev { background: var(--accent-soft); border-left: 3px solid var(--accent); border-radius: 8px; padding: 10px 14px; font-size: 14px; line-height: 1.6; color: var(--ink-2); margin-bottom: 14px; }
+.prev b { display: block; color: var(--ink); font-size: 15px; margin-top: 2px; }
+
 .counter { display: flex; align-items: baseline; gap: 6px; margin: 4px 0 18px; color: var(--muted); font-size: 14px; }
 .counter b { font-size: 28px; color: var(--ink); font-variant-numeric: tabular-nums; }
 

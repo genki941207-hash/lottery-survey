@@ -4,6 +4,9 @@
   var Q = window.QUESTIONS;
   var C = window.CONFIG;
   var DEMO = !C.API_URL;
+  // 正確格式：https://script.google.com/macros/s/xxxxx/exec
+  var API_BAD = !DEMO && !/^https:\/\/script\.google\.com\/macros\/s\/[^/]+\/exec$/.test(C.API_URL.trim());
+  var API_BAD_MSG = 'API_URL 格式不對：請到 Apps Script「部署 → 管理部署作業」複製「網頁應用程式」網址（https://script.google.com/macros/s/…/exec），不要用瀏覽器轉址後的 googleusercontent 網址。';
   var byId = {};
   Q.forEach(function (q, i) { byId[q.id] = q; q.index = i; });
 
@@ -120,7 +123,15 @@
   }
 
   function demoBanner() {
+    if (API_BAD) return '<div class="demo-banner warn">⚠️ ' + esc(API_BAD_MSG) + '</div>';
     return DEMO ? '<div class="demo-banner">🧪 示範模式：尚未設定 API_URL，送出不會寫入資料，統計圖為假資料。</div>' : '';
+  }
+
+  function friendlyError(e) {
+    var m = (e && e.message) || '';
+    if (API_BAD) return API_BAD_MSG;
+    if (/Failed to fetch|NetworkError|Load failed|JSON/i.test(m)) return '無法連線到伺服器，請檢查網路後再試一次。';
+    return m || '送出失敗，請稍後再試';
   }
 
   function renderLoading(text) {
@@ -194,6 +205,10 @@
       });
     } else {
       var v = state.answers[q.id];
+      var prevQ = Q[state.i - 1];
+      if (prevQ && prevQ.type === 'choice' && state.answers[prevQ.id]) {
+        h += '<div class="prev">你在上一題選了<b>' + esc(state.answers[prevQ.id]) + '</b></div>';
+      }
       h += '<div class="num"><input id="num" inputmode="decimal" autocomplete="off" placeholder="例如 100" aria-label="金額（元）" value="' +
              (v !== undefined ? esc(v) : '') + '"><span>元</span></div>' +
            '<p class="hint">' + esc(q.help || '') + '</p>' +
@@ -280,7 +295,7 @@
         render();
       })
       .catch(function (e) {
-        state.error = (e && e.message) || '網路連線不穩，請再試一次';
+        state.error = friendlyError(e);
         state.view = 'error';
         render();
       });
