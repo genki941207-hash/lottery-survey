@@ -266,3 +266,21 @@ lottery-survey/
 - 情境描述移到題目說明，標題只留問句
 - 送出後的確認訊息附上分享連結（不收信箱）
 - 注意：表單連結試算表後重新執行建題程式，會產生重複欄位，需換一份新試算表
+
+---
+
+## 12. 目前進度（2026-11-17 01:45）
+
+**已完成**
+- [x] 網站前端、Apps Script 後端、App 圖示全部完成，已推上 GitHub（`genki941207-hash/lottery-survey`），Claude 有推送權限
+- [x] Vercel 專案已建立（專案名稱 `lottery-survey-project`）
+- [x] 承上題（1-2、2-2、3-2）會顯示「你在上一題選了 ○○」
+- [x] 第 4 題選項三改為「有一點差別（較想買甲彩券，但也會考慮乙彩券）」，前後端都已更新
+- [x] 網站會自動檢查 API_URL 格式，格式錯誤時首頁顯示紅色提醒
+
+**待辦（下一步）**
+1. [ ] **把新版 `apps-script/Code.gs` 整份貼到 Apps Script，再「管理部署作業 → 編輯 → 新版本 → 部署」**。第 4 題選項已改，不更新後端的話，選到選項三的人會送出失敗。
+2. [ ] 修正 `js/config.js` 的 `API_URL`：目前填的是 `script.googleusercontent.com/macros/echo?...`（瀏覽器轉址後的暫存頁，無法送出），要換成「部署 → 管理部署作業」裡的 `https://script.google.com/macros/s/…/exec`。
+3. [ ] 確認網站網域拼字：`index.html` 的 og:image 目前是 `lottery-survey-projectt.vercel.app`（兩個 t），若實際網址不同要改。
+4. [ ] 上述完成後，用手機走一次完整流程，確認試算表有新增資料。
+5. [ ] 若 Google 表單 v2 也繼續收資料：表單的第 4 題選項三仍是舊文字，需同步修改或在分析時對應。
