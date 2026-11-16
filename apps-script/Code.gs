@@ -51,6 +51,17 @@ var WTP_BINS = [
   { label: '500 元以上', min: 500, max: Infinity }
 ];
 
+// ---------- 試算表上方的自訂選單（不用進 Apps Script 編輯器也能操作） ----------
+function onOpen() {
+  SpreadsheetApp.getUi()
+    .createMenu('🎰 彩券問卷')
+    .addItem('① 初始化工作表', 'setup')
+    .addSeparator()
+    .addItem('寫入 50 筆測試資料', 'seedTestData')
+    .addItem('刪除測試資料', 'deleteTestData')
+    .addToUi();
+}
+
 // ---------- 初始化：建立工作表、欄位與編碼簿 ----------
 function setup() {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
@@ -207,8 +218,12 @@ function getStats_() {
 
 // ---------- 工具 ----------
 function sheet_() {
-  var sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_RESPONSES);
-  if (!sh) throw new Error('找不到工作表「' + SHEET_RESPONSES + '」，請先執行 setup()');
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sh = ss.getSheetByName(SHEET_RESPONSES);
+  if (!sh) {            // 還沒初始化就自動初始化，不一定要手動執行 setup()
+    setup();
+    sh = ss.getSheetByName(SHEET_RESPONSES);
+  }
   return sh;
 }
 
