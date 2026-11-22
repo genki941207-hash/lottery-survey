@@ -9,12 +9,17 @@
  */
 
 // ---------- 設定 ----------
-var API_VERSION = '2026-11-22 每題計時版';   // 在瀏覽器打開 API 網址就會顯示，用來確認部署的是不是最新版
+var API_VERSION = '2026-11-22 各題中位數黃底版';   // 在瀏覽器打開 API 網址就會顯示，用來確認部署的是不是最新版
 var SHEET_RESPONSES = 'responses';
 var SHEET_CODEBOOK = 'codebook';
 var SHEET_SUMMARY = 'summary';   // 作答時間摘要（自動更新）
 var SHEET_TIMING = 'timing';     // 每題作答秒數（與 responses 分開放）
-var TIMING_FAST_SEC = 2;         // timing 分頁中，單題少於 2 秒的格子標成淡黃色
+// timing 分頁的黃底：每一題各自和「所有人在這一題的中位數」比較，符合任一條件就標黃
+//   ① 該題秒數 < 該題中位數 × TIMING_RATIO（該題累積滿 TIMING_MIN_SAMPLE 筆才套用）
+//   ② 該題秒數 < TIMING_MIN_SEC（快到不可能看完選項）
+var TIMING_RATIO = 0.3;
+var TIMING_MIN_SEC = 1;
+var TIMING_MIN_SAMPLE = 10;
 var STATS_CACHE_SECONDS = 60;
 
 // ---------- 作答過快標示（可自行調整） ----------
@@ -106,7 +111,7 @@ function setup() {
   rows.push(['（timing 分頁）timestamp + client_id', '', '對應鍵', '與 responses 分頁同一份回覆的 timestamp、client_id 完全相同，用這兩欄合併', '']);
   rows.push(['（timing 分頁）back_count', '', 'meta', '作答過程中按「上一題」的次數', '']);
   QUESTIONS.forEach(function (q) {
-    rows.push(['（timing 分頁）T_' + q.id, q.no, '秒數', '停留在第 ' + q.no + ' 題的總秒數（回頭修改會累加）；空白 = 沒看到這題（選「不想買」後自動跳過的金額題）', '']);
+    rows.push(['（timing 分頁）T_' + q.id, q.no, '秒數', '停留在第 ' + q.no + ' 題的總秒數（回頭修改會累加）；空白 = 沒看到這題（選「不想買」後自動跳過的金額題）；低於該題中位數 × ' + TIMING_RATIO + ' 或低於 ' + TIMING_MIN_SEC + ' 秒時標黃', '']);
   });
   rows.push([SPEED_COLUMN, '', 'meta', '作答過快標示：秒數低於中位數 × ' + SPEED_RATIO + ' 或低於 ' + SPEED_MIN_SEC + ' 秒時填入說明，空白 = 正常', '']);
   QUESTIONS.forEach(function (q) {
@@ -420,6 +425,31 @@ function writeSpeedSummary_(durs, med, useRatio, flagged) {
   sm.setColumnWidth(1, 200);   // 中文自動調整欄寬會被切掉，改成固定寬度
   sm.setColumnWidth(2, 300);
   sm.setColumnWidth(3, 420);
+
+  // 各題作答秒數（來自 timing 分頁）
+  var ts = ss.getSheetByName(SHEET_TIMING);
+  if (!ts || ts.getLastRow() < 2) return;
+  var th = ts.getRange(1, 1, 1, ts.getLastColumn()).getValues()[0];
+  var tv = ts.getRange(2, 1, ts.getLastRow() - 1, th.length).getValues();
+  var qRows = [['各題作答秒數', '中位數', '黃底門檻（低於此值標黃）', '有秒數的筆數']];
+  QUESTIONS.forEach(function (q) {
+    var idx = th.indexOf('T_' + q.id);
+    if (idx < 0) return;
+    var vals = [];
+    tv.forEach(function (r) {
+      var raw = r[idx], v = Number(raw);
+      if (raw !== '' && raw !== null && isFinite(v)) vals.push(v);
+    });
+    var m = median_(vals);
+    var cut = (vals.length >= TIMING_MIN_SAMPLE && m !== null) ? Math.max(TIMING_MIN_SEC, m * TIMING_RATIO) : TIMING_MIN_SEC;
+    qRows.push([q.no + ' 題', m === null ? '—' : (Math.round(m * 10) / 10) + ' 秒',
+                (Math.round(cut * 10) / 10) + ' 秒' + (vals.length < TIMING_MIN_SAMPLE ? '（未滿 ' + TIMING_MIN_SAMPLE + ' 筆，暫用固定門檻）' : ''),
+                vals.length]);
+  });
+  var start = rows.length + 2;
+  sm.getRange(start, 1, qRows.length, 4).setValues(qRows);
+  sm.getRange(start, 1, 1, 4).setFontWeight('bold');
+  sm.setColumnWidth(4, 140);
 }
 
 // 條件式格式：speed_flag 有內容的列整列變淡紅色（只建立一次，不會覆蓋你手動上的顏色）
@@ -466,7 +496,7 @@ function timingHeader_() {
 function timingSheet_() {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var ts = ss.getSheetByName(SHEET_TIMING);
-  if (ts) return ts;
+  if (ts) { ensureTimingRule_(ts); return ts; }
 
   ts = ss.insertSheet(SHEET_TIMING);
   var header = timingHeader_();
@@ -475,15 +505,37 @@ function timingSheet_() {
   ts.getRange('A2:C').setNumberFormat('@');                                   // 對應鍵維持文字
   ts.getRange('E2:' + columnLetter_(header.length)).setNumberFormat('0.0');   // 秒數，小數一位
 
-  var range = ts.getRange('E2:' + columnLetter_(header.length));
-  var rule = SpreadsheetApp.newConditionalFormatRule()
-    .whenFormulaSatisfied('=AND(ISNUMBER(E2),E2<' + TIMING_FAST_SEC + ')')
-    .setBackground('#fff3cd')
-    .setFontColor('#664d03')
-    .setRanges([range])
-    .build();
-  ts.setConditionalFormatRules([rule]);
+  ensureTimingRule_(ts);
   return ts;
+}
+
+// 黃底規則：每一欄（每一題）各自用自己那一欄的中位數比較。
+// 公式寫的是左上角 E2 的版本，套用到 E2:P 時，Google 試算表會自動換成各欄自己的欄位。
+// 每次呼叫都會檢查：門檻設定改過就自動換成新規則。
+function timingRuleFormula_() {
+  return '=AND(ISNUMBER(E2),OR(E2<' + TIMING_MIN_SEC +
+         ',AND(COUNT(E$2:E)>=' + TIMING_MIN_SAMPLE + ',E2<MEDIAN(E$2:E)*' + TIMING_RATIO + ')))';
+}
+
+function ensureTimingRule_(ts) {
+  var formula = timingRuleFormula_();
+  var rules = ts.getConditionalFormatRules();
+  function formulaOf(rule) {
+    var c = rule.getBooleanCondition();
+    return c && c.getCriteriaType() === SpreadsheetApp.BooleanCriteria.CUSTOM_FORMULA ? c.getCriteriaValues()[0] : '';
+  }
+  if (rules.some(function (r) { return formulaOf(r) === formula; })) return;      // 已是最新規則
+  var others = rules.filter(function (r) { return formulaOf(r).indexOf('=AND(ISNUMBER(E2)') !== 0; }); // 只換掉本程式建立的規則
+  var lastLetter = columnLetter_(timingHeader_().length);
+  others.push(
+    SpreadsheetApp.newConditionalFormatRule()
+      .whenFormulaSatisfied(formula)
+      .setBackground('#fff3cd')
+      .setFontColor('#664d03')
+      .setRanges([ts.getRange('E2:' + lastLetter)])
+      .build()
+  );
+  ts.setConditionalFormatRules(others);
 }
 
 // 一列 timing 資料：對應鍵沿用 responses 那一列的 timestamp、client_id、source
