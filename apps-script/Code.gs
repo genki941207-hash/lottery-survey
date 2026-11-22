@@ -13,6 +13,15 @@ var SHEET_RESPONSES = 'responses';
 var SHEET_CODEBOOK = 'codebook';
 var STATS_CACHE_SECONDS = 60;
 
+// ---------- 作答過快標示（可自行調整） ----------
+// 符合任一條件就在 speed_flag 欄標示，整列變成淡紅色：
+//   ① 作答秒數 < 所有人作答秒數的「中位數」× SPEED_RATIO
+//   ② 作答秒數 < SPEED_MIN_SEC（不管別人多快，這麼短幾乎不可能認真看完題目）
+var SPEED_COLUMN = 'speed_flag';
+var SPEED_RATIO = 0.5;        // 少於中位數的一半就標示
+var SPEED_MIN_SEC = 30;       // 少於 30 秒一律標示
+var SPEED_MIN_SAMPLE = 10;    // 累積滿 10 筆才開始和中位數比較（太少筆時中位數不準）
+
 // ---------- 題目（選項文字與原表單完全一致，不可更動） ----------
 var QUESTIONS = [
   { id: 'Q1_1', no: '1-1', type: 'choice', title: '如果只能選一種，您會想買哪一張？（方案一：頭獎 1,000 萬、機率 10 萬分之一；方案二：頭獎 1 億、機率 200 萬分之一）',
@@ -59,6 +68,8 @@ function onOpen() {
     .addSeparator()
     .addItem('寫入 50 筆測試資料', 'seedTestData')
     .addItem('刪除測試資料', 'deleteTestData')
+    .addSeparator()
+    .addItem('重新標示作答過快', 'updateSpeedFlagsMenu')
     .addToUi();
 }
 
@@ -67,11 +78,12 @@ function setup() {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
 
   var sh = ss.getSheetByName(SHEET_RESPONSES) || ss.insertSheet(SHEET_RESPONSES);
-  var header = META_COLUMNS.concat(QUESTIONS.map(function (q) { return q.id; }));
+  var header = META_COLUMNS.concat(QUESTIONS.map(function (q) { return q.id; }), [SPEED_COLUMN]);
   sh.getRange(1, 1, 1, header.length).setValues([header]).setFontWeight('bold');
   sh.setFrozenRows(1);
   // 所有欄位設為純文字，避免 Sheets 自動把「5,000 元以下」等選項轉格式
   sh.getRange(1, 1, sh.getMaxRows(), header.length).setNumberFormat('@');
+  ensureSpeedRule_(sh, header.indexOf(SPEED_COLUMN) + 1);
 
   var cb = ss.getSheetByName(SHEET_CODEBOOK) || ss.insertSheet(SHEET_CODEBOOK);
   cb.clear();
@@ -81,11 +93,12 @@ function setup() {
       timestamp: '伺服器收到回覆的時間',
       client_id: '瀏覽器隨機產生的匿名 ID（同裝置重複填答時相同，可用來去重）',
       duration_sec: '從按下「開始作答」到送出的秒數（可用來排除亂填的超快作答）',
-      source: '來源（web）',
+      source: '來源（web = 真實回覆，test = 測試資料）',
       version: '問卷版本'
     }[m];
     rows.push([m, '', 'meta', desc, '']);
   });
+  rows.push([SPEED_COLUMN, '', 'meta', '作答過快標示：秒數低於中位數 × ' + SPEED_RATIO + ' 或低於 ' + SPEED_MIN_SEC + ' 秒時填入說明，空白 = 正常', '']);
   QUESTIONS.forEach(function (q) {
     rows.push([q.id, q.no, q.type === 'choice' ? '單選' : '數字（元）', q.title, q.options ? q.options.join(' | ') : '']);
   });
@@ -116,6 +129,7 @@ function doPost(e) {
     lock.waitLock(10000);
     try {
       sheet_().appendRow(row);
+      try { updateSpeedFlags_(); } catch (flagErr) { /* 標示失敗不影響送出 */ }
     } finally {
       lock.releaseLock();
     }
@@ -239,6 +253,7 @@ function seedTestData() {
   rows.forEach(function (r) { r[3] = 'test'; });
   sh.getRange(sh.getLastRow() + 1, 1, rows.length, rows[0].length).setValues(rows);
   CacheService.getScriptCache().remove('stats');
+  updateSpeedFlags_();
   Logger.log('✅ 已寫入 50 筆測試資料（source = test）');
 }
 
@@ -250,6 +265,7 @@ function deleteTestData() {
     if (vals[i][3] === 'test') sh.deleteRow(i + 1);
   }
   CacheService.getScriptCache().remove('stats');
+  updateSpeedFlags_();
   Logger.log('🧹 已刪除測試資料');
 }
 
@@ -276,6 +292,98 @@ function simulate_() {
   a.Q7 = w(O.Q7, [0.55, 0.42, 0.03]);
   a.Q8 = w(O.Q8, [0.45, 0.35, 0.13, 0.07]);
   a.Q9 = O.Q9[st];
-  return { answers: a, clientId: 'test-' + n_(), durationSec: Math.round(90 + r() * 200), version: 'test' };
+  return { answers: a, clientId: 'test-' + n_(), durationSec: r() < 0.1 ? Math.round(12 + r() * 20) : Math.round(90 + r() * 200), version: 'test' };
 }
 function n_() { return Utilities.getUuid().slice(0, 8); }
+
+// ---------- 作答過快標示 ----------
+// 從選單執行：重新計算並顯示結果
+function updateSpeedFlagsMenu() {
+  var n = updateSpeedFlags_();
+  SpreadsheetApp.getActiveSpreadsheet().toast('共標示 ' + n + ' 筆作答過快', '彩券問卷', 5);
+}
+
+// 重新計算所有列的 speed_flag（中位數會隨新回覆改變，所以每次全部重算）
+function updateSpeedFlags_() {
+  var sh = sheet_();
+  var lastCol = sh.getLastColumn();
+  var header = sh.getRange(1, 1, 1, lastCol).getValues()[0];
+
+  var fCol = header.indexOf(SPEED_COLUMN) + 1;
+  if (fCol === 0) {                       // 舊的工作表沒有這欄 → 自動補在最右邊
+    fCol = lastCol + 1;
+    sh.getRange(1, fCol).setValue(SPEED_COLUMN).setFontWeight('bold');
+  }
+  ensureSpeedRule_(sh, fCol);
+
+  var lastRow = sh.getLastRow();
+  if (lastRow < 2) return 0;
+
+  var dIdx = header.indexOf('duration_sec');
+  var sIdx = header.indexOf('source');
+  var data = sh.getRange(2, 1, lastRow - 1, Math.max(lastCol, fCol)).getValues();
+
+  function durationOf(r) {
+    var raw = String(r[dIdx]).trim();
+    var d = Number(raw);
+    return (raw !== '' && isFinite(d)) ? d : null;
+  }
+  // 真實回覆與測試資料都納入（測試資料正式上線前會刪掉）
+  function counted(r) { return r[sIdx] === 'web' || r[sIdx] === 'test'; }
+
+  var durs = [];
+  data.forEach(function (r) {
+    var d = durationOf(r);
+    if (counted(r) && d !== null) durs.push(d);
+  });
+  var med = median_(durs);
+  var useRatio = durs.length >= SPEED_MIN_SAMPLE && med !== null;
+
+  var flagged = 0;
+  var out = data.map(function (r) {
+    var d = durationOf(r);
+    if (!counted(r) || d === null) return [''];
+    var tooFast = d < SPEED_MIN_SEC || (useRatio && d < med * SPEED_RATIO);
+    if (!tooFast) return [''];
+    flagged++;
+    return ['⚠️ 過快：' + d + ' 秒' + (useRatio ? '（中位數 ' + Math.round(med) + ' 秒）' : '')];
+  });
+
+  sh.getRange(2, fCol, out.length, 1).setNumberFormat('@').setValues(out);
+  return flagged;
+}
+
+// 條件式格式：speed_flag 有內容的列整列變淡紅色（只建立一次，不會覆蓋你手動上的顏色）
+function ensureSpeedRule_(sh, fCol) {
+  var letter = columnLetter_(fCol);
+  var formula = '=$' + letter + '2<>""';
+  var rules = sh.getConditionalFormatRules();
+  var exists = rules.some(function (rule) {
+    var c = rule.getBooleanCondition();
+    return c && c.getCriteriaType() === SpreadsheetApp.BooleanCriteria.CUSTOM_FORMULA &&
+           c.getCriteriaValues()[0] === formula;
+  });
+  if (exists) return;
+  rules.push(
+    SpreadsheetApp.newConditionalFormatRule()
+      .whenFormulaSatisfied(formula)
+      .setBackground('#f8d7da')
+      .setFontColor('#842029')
+      .setRanges([sh.getRange('A2:' + letter)])
+      .build()
+  );
+  sh.setConditionalFormatRules(rules);
+}
+
+function median_(arr) {
+  if (!arr.length) return null;
+  var a = arr.slice().sort(function (x, y) { return x - y; });
+  var L = a.length;
+  return L % 2 ? a[(L - 1) / 2] : (a[L / 2 - 1] + a[L / 2]) / 2;
+}
+
+function columnLetter_(n) {
+  var s = '';
+  while (n > 0) { var m = (n - 1) % 26; s = String.fromCharCode(65 + m) + s; n = Math.floor((n - 1) / 26); }
+  return s;
+}

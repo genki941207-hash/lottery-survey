@@ -47,8 +47,8 @@ df <- read_csv("responses.csv",
     duration_sec = as.numeric(duration_sec)
   )
 
-# （選用）排除作答過快的人，門檻請看 duration_sec 的分布再決定
-# df <- df %>% filter(duration_sec >= 45)
+# （選用）排除作答過快的人：試算表的 speed_flag 欄有內容 = 過快（空白會讀成 NA）
+# df <- df %>% filter(is.na(speed_flag) | speed_flag == "")
 
 # ---------- 檢查：有對應不到的值就提醒 ----------
 bad <- df %>% filter(is.na(Q1_choice) | is.na(Q2_choice) | is.na(income) |
