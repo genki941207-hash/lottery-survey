@@ -9,6 +9,7 @@
  */
 
 // ---------- 設定 ----------
+var API_VERSION = '2026-11-22 每題計時版';   // 在瀏覽器打開 API 網址就會顯示，用來確認部署的是不是最新版
 var SHEET_RESPONSES = 'responses';
 var SHEET_CODEBOOK = 'codebook';
 var SHEET_SUMMARY = 'summary';   // 作答時間摘要（自動更新）
@@ -122,7 +123,7 @@ function setup() {
 function doGet(e) {
   var action = e && e.parameter && e.parameter.action;
   if (action === 'stats') return json_({ ok: true, stats: getStats_() });
-  return json_({ ok: true, message: 'Lottery survey API is running.' });
+  return json_({ ok: true, message: 'Lottery survey API is running.', apiVersion: API_VERSION });
 }
 
 function doPost(e) {
