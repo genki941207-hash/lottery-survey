@@ -9,7 +9,7 @@
  */
 
 // ---------- 設定 ----------
-var API_VERSION = '2026-11-22 欄名檢查修正版';   // 在瀏覽器打開 API 網址就會顯示，用來確認部署的是不是最新版
+var API_VERSION = '2026-11-22 一鍵清空版';   // 在瀏覽器打開 API 網址就會顯示，用來確認部署的是不是最新版
 var SHEET_RESPONSES = 'responses';
 var SHEET_CODEBOOK = 'codebook';
 var SHEET_SUMMARY = 'summary';   // 作答時間摘要（自動更新）
@@ -80,6 +80,8 @@ function onOpen() {
     .addItem('刪除測試資料', 'deleteTestData')
     .addSeparator()
     .addItem('重新標示作答過快', 'updateSpeedFlagsMenu')
+    .addSeparator()
+    .addItem('⚠️ 清空所有回覆（正式上線前用）', 'clearAllResponses')
     .addToUi();
 }
 
@@ -561,4 +563,25 @@ function timingRow_(body, responseRow) {
       if (raw === undefined || raw === null || raw === '' || !isFinite(v) || v < 0) return '';
       return Math.min(Math.round(v * 10) / 10, 3600);
     }), [clampNum_(body.inputErrors, 0, 1000)]);
+}
+
+// ---------- 清空所有回覆（保留欄名與設定） ----------
+// responses、timing 兩個分頁的資料列全部刪除，summary 歸零。會先跳出確認視窗。
+function clearAllResponses() {
+  var ui = SpreadsheetApp.getUi();
+  var ans = ui.alert('清空所有回覆',
+    '這會刪除 responses 與 timing 分頁的所有資料（包含真實回覆），只保留第一列欄名，而且無法復原。\n\n確定要清空嗎？',
+    ui.ButtonSet.YES_NO);
+  if (ans !== ui.Button.YES) return;
+
+  [sheet_(), timingSheet_()].forEach(function (sh) {
+    var rows = sh.getMaxRows(), cols = sh.getMaxColumns();
+    // 清除第 2 列以後所有內容（含備註）。用清除內容而不是刪列：保留文字格式與標色規則，
+    // 也避開「凍結列時不能刪光其他列」的限制。下一筆回覆會自動從第 2 列開始寫。
+    if (rows > 1) sh.getRange(2, 1, rows - 1, cols).clearContent();
+  });
+
+  CacheService.getScriptCache().remove('stats');
+  updateSpeedFlags_();
+  ui.alert('已清空，網站上的人數約 1 分鐘內會歸零。');
 }
