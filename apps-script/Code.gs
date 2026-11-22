@@ -416,7 +416,9 @@ function writeSpeedSummary_(durs, med, useRatio, flagged) {
   sm.getRange(1, 1, rows.length, 3).setValues(rows);
   sm.getRange(1, 1, 1, 3).setFontWeight('bold');
   sm.setFrozenRows(1);
-  sm.autoResizeColumns(1, 3);
+  sm.setColumnWidth(1, 200);   // 中文自動調整欄寬會被切掉，改成固定寬度
+  sm.setColumnWidth(2, 300);
+  sm.setColumnWidth(3, 420);
 }
 
 // 條件式格式：speed_flag 有內容的列整列變淡紅色（只建立一次，不會覆蓋你手動上的顏色）
