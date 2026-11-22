@@ -11,6 +11,7 @@
 // ---------- 設定 ----------
 var SHEET_RESPONSES = 'responses';
 var SHEET_CODEBOOK = 'codebook';
+var SHEET_SUMMARY = 'summary';   // 作答時間摘要（自動更新）
 var STATS_CACHE_SECONDS = 60;
 
 // ---------- 作答過快標示（可自行調整） ----------
@@ -350,7 +351,40 @@ function updateSpeedFlags_() {
   });
 
   sh.getRange(2, fCol, out.length, 1).setNumberFormat('@').setValues(out);
+  writeSpeedSummary_(durs, med, useRatio, flagged);
   return flagged;
+}
+
+// summary 工作表：整體作答時間摘要（每次重新標示時一起更新）
+function writeSpeedSummary_(durs, med, useRatio, flagged) {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sm = ss.getSheetByName(SHEET_SUMMARY) || ss.insertSheet(SHEET_SUMMARY);
+  var threshold = useRatio ? Math.max(SPEED_MIN_SEC, med * SPEED_RATIO) : SPEED_MIN_SEC;
+  var normal = durs.filter(function (d) { return d >= threshold; });
+  function avg(a) { return a.length ? a.reduce(function (x, y) { return x + y; }, 0) / a.length : null; }
+  function fmt(sec) {
+    if (sec === null || sec === undefined) return '—';
+    var t = Math.round(sec);
+    return Math.floor(t / 60) + ' 分 ' + ('0' + (t % 60)).slice(-2) + ' 秒（' + t + ' 秒）';
+  }
+  var rows = [
+    ['項目', '數值', '說明'],
+    ['納入計算的回覆數', durs.length, 'source 為 web 或 test、且有作答秒數的列'],
+    ['作答時間中位數', fmt(med), '一半的人比這快、一半比這慢；用來判斷過快'],
+    ['平均作答時間（全部）', fmt(avg(durs)), '會被少數拖很久的人拉高'],
+    ['平均作答時間（排除過快）', fmt(avg(normal)), '比較能代表正常作答者'],
+    ['最短 / 最長', durs.length ? fmt(Math.min.apply(null, durs)) + ' ／ ' + fmt(Math.max.apply(null, durs)) : '—', ''],
+    ['目前的過快門檻', fmt(threshold), useRatio
+      ? '中位數 × ' + SPEED_RATIO + '，且至少 ' + SPEED_MIN_SEC + ' 秒'
+      : '回覆未滿 ' + SPEED_MIN_SAMPLE + ' 筆，暫時只用 ' + SPEED_MIN_SEC + ' 秒門檻'],
+    ['被標示過快的筆數', flagged, durs.length ? Math.round(flagged / durs.length * 100) + '%' : ''],
+    ['最後更新', Utilities.formatDate(new Date(), 'Asia/Taipei', 'yyyy-MM-dd HH:mm:ss'), '有新回覆或執行「重新標示作答過快」時自動更新']
+  ];
+  sm.clear();
+  sm.getRange(1, 1, rows.length, 3).setValues(rows);
+  sm.getRange(1, 1, 1, 3).setFontWeight('bold');
+  sm.setFrozenRows(1);
+  sm.autoResizeColumns(1, 3);
 }
 
 // 條件式格式：speed_flag 有內容的列整列變淡紅色（只建立一次，不會覆蓋你手動上的顏色）
