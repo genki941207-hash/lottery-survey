@@ -9,10 +9,11 @@
  */
 
 // ---------- 設定 ----------
-var API_VERSION = '2026-11-22 各題中位數黃底版';   // 在瀏覽器打開 API 網址就會顯示，用來確認部署的是不是最新版
+var API_VERSION = '2026-11-22 金額上限版';   // 在瀏覽器打開 API 網址就會顯示，用來確認部署的是不是最新版
 var SHEET_RESPONSES = 'responses';
 var SHEET_CODEBOOK = 'codebook';
 var SHEET_SUMMARY = 'summary';   // 作答時間摘要（自動更新）
+var MAX_WTP = 1000000;          // 金額題上限（元），需與網站 js/questions.js 的 MAX_WTP 相同
 var SHEET_TIMING = 'timing';     // 每題作答秒數（與 responses 分開放）
 // timing 分頁的黃底：每一題各自和「所有人在這一題的中位數」比較，符合任一條件就標黃
 //   ① 該題秒數 < 該題中位數 × TIMING_RATIO（該題累積滿 TIMING_MIN_SAMPLE 筆才套用）
@@ -110,6 +111,7 @@ function setup() {
   });
   rows.push(['（timing 分頁）timestamp + client_id', '', '對應鍵', '與 responses 分頁同一份回覆的 timestamp、client_id 完全相同，用這兩欄合併', '']);
   rows.push(['（timing 分頁）back_count', '', 'meta', '作答過程中按「上一題」的次數', '']);
+  rows.push(['（timing 分頁）input_errors', '', 'meta', '金額題輸入被擋下的次數（格式錯誤或超過 ' + MAX_WTP + ' 元上限）；大於 0 可能代表不認真作答', '']);
   QUESTIONS.forEach(function (q) {
     rows.push(['（timing 分頁）T_' + q.id, q.no, '秒數', '停留在第 ' + q.no + ' 題的總秒數（回頭修改會累加）；空白 = 沒看到這題（選「不想買」後自動跳過的金額題）；低於該題中位數 × ' + TIMING_RATIO + ' 或低於 ' + TIMING_MIN_SEC + ' 秒時標黃', '']);
   });
@@ -177,9 +179,10 @@ function validate_(body) {
       row.push(v);
     } else {
       var n = Number(v);
-      if (v === '' || v === null || v === undefined || !isFinite(n) || n < 0 || n > 1e9) {
+      if (v === '' || v === null || v === undefined || !isFinite(n) || n < 0) {
         throw new Error(q.no + ' 題請填入 0 以上的數字');
       }
+      if (n > MAX_WTP) throw new Error(q.no + ' 題金額上限為 ' + MAX_WTP.toLocaleString() + ' 元');
       row.push(String(n));
     }
   });
@@ -331,7 +334,7 @@ function simulate_() {
     var sec = base * (0.5 + r()) * (dur < 35 ? 0.12 : 1);
     timing[q.id] = Math.round(sec * 10) / 10;
   });
-  return { answers: a, clientId: 'test-' + n_(), durationSec: dur, version: 'test', timing: timing, backCount: r() < 0.2 ? 1 : 0 };
+  return { answers: a, clientId: 'test-' + n_(), durationSec: dur, version: 'test', timing: timing, backCount: r() < 0.2 ? 1 : 0, inputErrors: r() < 0.1 ? 1 : 0 };
 }
 function n_() { return Utilities.getUuid().slice(0, 8); }
 
@@ -489,21 +492,29 @@ function columnLetter_(n) {
 
 // ---------- 每題作答秒數（timing 分頁） ----------
 function timingHeader_() {
-  return ['timestamp', 'client_id', 'source', 'back_count'].concat(QUESTIONS.map(function (q) { return 'T_' + q.id; }));
+  // input_errors 放最後，舊的 timing 分頁會自動補上欄名，T_ 各欄位置不變
+  return ['timestamp', 'client_id', 'source', 'back_count'].concat(QUESTIONS.map(function (q) { return 'T_' + q.id; }), ['input_errors']);
 }
 
 // 取得 timing 分頁；不存在就建立（含欄位、格式、過快標色）
 function timingSheet_() {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var ts = ss.getSheetByName(SHEET_TIMING);
-  if (ts) { ensureTimingRule_(ts); return ts; }
+  if (ts) {
+    var want = timingHeader_();
+    if (ts.getLastColumn() < want.length) {                 // 舊分頁缺新欄位 → 補上欄名
+      ts.getRange(1, 1, 1, want.length).setValues([want]).setFontWeight('bold');
+    }
+    ensureTimingRule_(ts);
+    return ts;
+  }
 
   ts = ss.insertSheet(SHEET_TIMING);
   var header = timingHeader_();
   ts.getRange(1, 1, 1, header.length).setValues([header]).setFontWeight('bold');
   ts.setFrozenRows(1);
   ts.getRange('A2:C').setNumberFormat('@');                                   // 對應鍵維持文字
-  ts.getRange('E2:' + columnLetter_(header.length)).setNumberFormat('0.0');   // 秒數，小數一位
+  ts.getRange('E2:' + columnLetter_(4 + QUESTIONS.length)).setNumberFormat('0.0');   // 秒數，小數一位
 
   ensureTimingRule_(ts);
   return ts;
@@ -526,7 +537,7 @@ function ensureTimingRule_(ts) {
   }
   if (rules.some(function (r) { return formulaOf(r) === formula; })) return;      // 已是最新規則
   var others = rules.filter(function (r) { return formulaOf(r).indexOf('=AND(ISNUMBER(E2)') !== 0; }); // 只換掉本程式建立的規則
-  var lastLetter = columnLetter_(timingHeader_().length);
+  var lastLetter = columnLetter_(4 + QUESTIONS.length);    // 只套用在 T_ 各題秒數欄
   others.push(
     SpreadsheetApp.newConditionalFormatRule()
       .whenFormulaSatisfied(formula)
@@ -547,5 +558,5 @@ function timingRow_(body, responseRow) {
       var v = Number(raw);
       if (raw === undefined || raw === null || raw === '' || !isFinite(v) || v < 0) return '';
       return Math.min(Math.round(v * 10) / 10, 3600);
-    }));
+    }), [clampNum_(body.inputErrors, 0, 1000)]);
 }

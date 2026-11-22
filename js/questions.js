@@ -1,5 +1,6 @@
 // 題目定義：選項文字必須與後端 apps-script/Code.gs 以及原表單完全一致
-window.SURVEY_VERSION = 'web-1.1';  // 1.1 起記錄每題作答秒數
+window.SURVEY_VERSION = 'web-1.2';  // 1.1 起記錄每題作答秒數；1.2 起記錄金額輸入錯誤次數
+window.MAX_WTP = 1000000;          // 金額題上限（元），需與後端 Code.gs 的 MAX_WTP 相同
 
 window.PART1_INSTRUCTION =
   '假設以下各題的彩券每張售價皆為 100 元，且除了題目說明的頭獎之外，沒有其他小獎。請假設您手邊有足夠的零用錢可以購買。';

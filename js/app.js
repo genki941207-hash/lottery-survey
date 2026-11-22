@@ -16,7 +16,7 @@
   var state = {
     view: 'home', i: 0, answers: {}, autoZero: {}, history: [],
     stats: null, error: '', startedAt: null, record: loadRecord(),
-    timing: {}, qShownAt: null, backCount: 0   // 每題停留秒數、按上一題次數
+    timing: {}, qShownAt: null, backCount: 0, inputErrors: 0   // 每題停留秒數、按上一題次數、金額輸入被擋次數
   };
   var app = document.getElementById('app');
 
@@ -167,7 +167,7 @@
     $('start').onclick = function () {
       state.view = 'q'; state.i = 0; state.history = []; state.answers = {}; state.autoZero = {};
       state.startedAt = Date.now();
-      state.timing = {}; state.backCount = 0; state.qShownAt = null;
+      state.timing = {}; state.backCount = 0; state.qShownAt = null; state.inputErrors = 0;
       render();
     };
   }
@@ -223,7 +223,7 @@
       if (prevQ && prevQ.type === 'choice' && state.answers[prevQ.id]) {
         h += '<div class="prev">你在上一題選了<b>' + esc(state.answers[prevQ.id]) + '</b></div>';
       }
-      h += '<div class="num"><input id="num" inputmode="decimal" autocomplete="off" placeholder="例如 100" aria-label="金額（元）" value="' +
+      h += '<div class="num"><input id="num" inputmode="decimal" autocomplete="off" maxlength="12" placeholder="例如 100" aria-label="金額（元）" value="' +
              (v !== undefined ? esc(v) : '') + '"><span>元</span></div>' +
            '<p class="hint">' + esc(q.help || '') + '</p>' +
            '<div class="err" id="err" role="alert"></div>' +
@@ -244,7 +244,13 @@
       var submitNum = function () {
         var s = inp.value.trim().replace(/[,，\s]/g, '').replace(/元$/, '');
         if (!/^\d+(\.\d+)?$/.test(s)) {
+          state.inputErrors++;
           $('err').textContent = '請填入 0 以上的數字（不需加「元」）';
+          return;
+        }
+        if (Number(s) > window.MAX_WTP) {
+          state.inputErrors++;
+          $('err').textContent = '金額上限為 ' + fmt(window.MAX_WTP) + ' 元，請重新填寫';
           return;
         }
         state.answers[q.id] = Number(s);
@@ -301,6 +307,7 @@
       version: window.SURVEY_VERSION,
       timing: state.timing,
       backCount: state.backCount,
+      inputErrors: state.inputErrors,
       website: hp ? hp.value : ''
     };
     state.view = 'submitting'; render();
