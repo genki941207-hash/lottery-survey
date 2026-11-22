@@ -12,6 +12,8 @@
 var SHEET_RESPONSES = 'responses';
 var SHEET_CODEBOOK = 'codebook';
 var SHEET_SUMMARY = 'summary';   // 作答時間摘要（自動更新）
+var SHEET_TIMING = 'timing';     // 每題作答秒數（與 responses 分開放）
+var TIMING_FAST_SEC = 2;         // timing 分頁中，單題少於 2 秒的格子標成淡黃色
 var STATS_CACHE_SECONDS = 60;
 
 // ---------- 作答過快標示（可自行調整） ----------
@@ -85,6 +87,7 @@ function setup() {
   // 所有欄位設為純文字，避免 Sheets 自動把「5,000 元以下」等選項轉格式
   sh.getRange(1, 1, sh.getMaxRows(), header.length).setNumberFormat('@');
   ensureSpeedRule_(sh, header.indexOf(SPEED_COLUMN) + 1);
+  timingSheet_();
 
   var cb = ss.getSheetByName(SHEET_CODEBOOK) || ss.insertSheet(SHEET_CODEBOOK);
   cb.clear();
@@ -98,6 +101,11 @@ function setup() {
       version: '問卷版本'
     }[m];
     rows.push([m, '', 'meta', desc, '']);
+  });
+  rows.push(['（timing 分頁）timestamp + client_id', '', '對應鍵', '與 responses 分頁同一份回覆的 timestamp、client_id 完全相同，用這兩欄合併', '']);
+  rows.push(['（timing 分頁）back_count', '', 'meta', '作答過程中按「上一題」的次數', '']);
+  QUESTIONS.forEach(function (q) {
+    rows.push(['（timing 分頁）T_' + q.id, q.no, '秒數', '停留在第 ' + q.no + ' 題的總秒數（回頭修改會累加）；空白 = 沒看到這題（選「不想買」後自動跳過的金額題）', '']);
   });
   rows.push([SPEED_COLUMN, '', 'meta', '作答過快標示：秒數低於中位數 × ' + SPEED_RATIO + ' 或低於 ' + SPEED_MIN_SEC + ' 秒時填入說明，空白 = 正常', '']);
   QUESTIONS.forEach(function (q) {
@@ -130,6 +138,9 @@ function doPost(e) {
     lock.waitLock(10000);
     try {
       sheet_().appendRow(row);
+      if (body.timing) {
+        try { timingSheet_().appendRow(timingRow_(body, row)); } catch (tErr) { /* 計時寫入失敗不影響送出 */ }
+      }
       try { updateSpeedFlags_(); } catch (flagErr) { /* 標示失敗不影響送出 */ }
     } finally {
       lock.releaseLock();
@@ -249,10 +260,17 @@ function json_(obj) {
 // ---------- 測試用：寫入 50 筆模擬資料 ----------
 function seedTestData() {
   var sh = sheet_();
-  var rows = [];
-  for (var n = 0; n < 50; n++) rows.push(validate_(simulate_()));
-  rows.forEach(function (r) { r[3] = 'test'; });
+  var rows = [], tRows = [];
+  for (var n = 0; n < 50; n++) {
+    var sim = simulate_();
+    var row = validate_(sim);
+    row[3] = 'test';
+    rows.push(row);
+    tRows.push(timingRow_(sim, row));
+  }
   sh.getRange(sh.getLastRow() + 1, 1, rows.length, rows[0].length).setValues(rows);
+  var ts = timingSheet_();
+  ts.getRange(ts.getLastRow() + 1, 1, tRows.length, tRows[0].length).setValues(tRows);
   CacheService.getScriptCache().remove('stats');
   updateSpeedFlags_();
   Logger.log('✅ 已寫入 50 筆測試資料（source = test）');
@@ -264,6 +282,11 @@ function deleteTestData() {
   var vals = sh.getDataRange().getValues();
   for (var i = vals.length - 1; i >= 1; i--) {
     if (vals[i][3] === 'test') sh.deleteRow(i + 1);
+  }
+  var ts = timingSheet_();
+  var tv = ts.getDataRange().getValues();
+  for (var j = tv.length - 1; j >= 1; j--) {
+    if (tv[j][2] === 'test') ts.deleteRow(j + 1);
   }
   CacheService.getScriptCache().remove('stats');
   updateSpeedFlags_();
@@ -293,7 +316,16 @@ function simulate_() {
   a.Q7 = w(O.Q7, [0.55, 0.42, 0.03]);
   a.Q8 = w(O.Q8, [0.45, 0.35, 0.13, 0.07]);
   a.Q9 = O.Q9[st];
-  return { answers: a, clientId: 'test-' + n_(), durationSec: r() < 0.1 ? Math.round(12 + r() * 20) : Math.round(90 + r() * 200), version: 'test' };
+  var dur = r() < 0.1 ? Math.round(12 + r() * 20) : Math.round(90 + r() * 200);
+  var timing = {};
+  QUESTIONS.forEach(function (q, idx) {
+    var prev = QUESTIONS[idx - 1];
+    if (q.type === 'number' && prev && a[prev.id] === prev.options[prev.options.length - 1]) return; // 不想買 → 金額題被跳過
+    var base = q.type === 'number' ? 6 : (['Q1_1', 'Q2_1', 'Q3_1', 'Q4'].indexOf(q.id) >= 0 ? 15 : 4);
+    var sec = base * (0.5 + r()) * (dur < 35 ? 0.12 : 1);
+    timing[q.id] = Math.round(sec * 10) / 10;
+  });
+  return { answers: a, clientId: 'test-' + n_(), durationSec: dur, version: 'test', timing: timing, backCount: r() < 0.2 ? 1 : 0 };
 }
 function n_() { return Utilities.getUuid().slice(0, 8); }
 
@@ -420,4 +452,45 @@ function columnLetter_(n) {
   var s = '';
   while (n > 0) { var m = (n - 1) % 26; s = String.fromCharCode(65 + m) + s; n = Math.floor((n - 1) / 26); }
   return s;
+}
+
+// ---------- 每題作答秒數（timing 分頁） ----------
+function timingHeader_() {
+  return ['timestamp', 'client_id', 'source', 'back_count'].concat(QUESTIONS.map(function (q) { return 'T_' + q.id; }));
+}
+
+// 取得 timing 分頁；不存在就建立（含欄位、格式、過快標色）
+function timingSheet_() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var ts = ss.getSheetByName(SHEET_TIMING);
+  if (ts) return ts;
+
+  ts = ss.insertSheet(SHEET_TIMING);
+  var header = timingHeader_();
+  ts.getRange(1, 1, 1, header.length).setValues([header]).setFontWeight('bold');
+  ts.setFrozenRows(1);
+  ts.getRange('A2:C').setNumberFormat('@');                                   // 對應鍵維持文字
+  ts.getRange('E2:' + columnLetter_(header.length)).setNumberFormat('0.0');   // 秒數，小數一位
+
+  var range = ts.getRange('E2:' + columnLetter_(header.length));
+  var rule = SpreadsheetApp.newConditionalFormatRule()
+    .whenFormulaSatisfied('=AND(ISNUMBER(E2),E2<' + TIMING_FAST_SEC + ')')
+    .setBackground('#fff3cd')
+    .setFontColor('#664d03')
+    .setRanges([range])
+    .build();
+  ts.setConditionalFormatRules([rule]);
+  return ts;
+}
+
+// 一列 timing 資料：對應鍵沿用 responses 那一列的 timestamp、client_id、source
+function timingRow_(body, responseRow) {
+  var t = body.timing || {};
+  return [responseRow[0], responseRow[1], responseRow[3], clampNum_(body.backCount, 0, 1000)]
+    .concat(QUESTIONS.map(function (q) {
+      var raw = t[q.id];
+      var v = Number(raw);
+      if (raw === undefined || raw === null || raw === '' || !isFinite(v) || v < 0) return '';
+      return Math.min(Math.round(v * 10) / 10, 3600);
+    }));
 }

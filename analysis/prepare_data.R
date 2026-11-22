@@ -50,6 +50,12 @@ df <- read_csv("responses.csv",
 # （選用）排除作答過快的人：試算表的 speed_flag 欄有內容 = 過快（空白會讀成 NA）
 # df <- df %>% filter(is.na(speed_flag) | speed_flag == "")
 
+# （選用）合併每題作答秒數：在試算表的 timing 分頁 下載 CSV，存成 timing.csv
+# timing <- read_csv("timing.csv", col_types = cols(.default = col_character())) %>%
+#   select(-source) %>%
+#   mutate(across(c(back_count, starts_with("T_")), as.numeric))
+# df <- df %>% left_join(timing, by = c("timestamp", "client_id"))
+
 # ---------- 檢查：有對應不到的值就提醒 ----------
 bad <- df %>% filter(is.na(Q1_choice) | is.na(Q2_choice) | is.na(income) |
                      is.na(Q1_spend) | is.na(Q2_spend))

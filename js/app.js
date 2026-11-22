@@ -15,7 +15,8 @@
 
   var state = {
     view: 'home', i: 0, answers: {}, autoZero: {}, history: [],
-    stats: null, error: '', startedAt: null, record: loadRecord()
+    stats: null, error: '', startedAt: null, record: loadRecord(),
+    timing: {}, qShownAt: null, backCount: 0   // 每題停留秒數、按上一題次數
   };
   var app = document.getElementById('app');
 
@@ -166,12 +167,23 @@
     $('start').onclick = function () {
       state.view = 'q'; state.i = 0; state.history = []; state.answers = {}; state.autoZero = {};
       state.startedAt = Date.now();
+      state.timing = {}; state.backCount = 0; state.qShownAt = null;
       render();
     };
   }
 
   // ---------- 題目 ----------
+  // 離開目前題目時，把停留秒數累加到這一題（回頭修改也會累加）
+  function leaveQuestion() {
+    if (state.view !== 'q' || !state.qShownAt) return;
+    var id = Q[state.i].id;
+    var sec = (Date.now() - state.qShownAt) / 1000;
+    state.timing[id] = Math.round(((state.timing[id] || 0) + sec) * 10) / 10;
+    state.qShownAt = null;
+  }
+
   function go(next) {
+    leaveQuestion();
     state.history.push(state.i);
     state.i = next;
     state.view = next >= Q.length ? 'confirm' : 'q';
@@ -179,6 +191,8 @@
   }
 
   function goBack() {
+    leaveQuestion();
+    state.backCount++;
     if (!state.history.length) { state.view = 'home'; render(); return; }
     state.i = state.history.pop();
     state.view = 'q';
@@ -217,6 +231,7 @@
     }
 
     app.innerHTML = h;
+    state.qShownAt = Date.now();
     $('back').onclick = goBack;
 
     if (q.type === 'choice') {
@@ -243,6 +258,7 @@
   }
 
   function choose(q, k, el) {
+    leaveQuestion();
     state.answers[q.id] = q.options[k];
     var all = app.querySelectorAll('.opt');
     for (var j = 0; j < all.length; j++) all[j].classList.remove('sel');
@@ -283,6 +299,8 @@
       clientId: clientId(),
       durationSec: state.startedAt ? Math.round((Date.now() - state.startedAt) / 1000) : null,
       version: window.SURVEY_VERSION,
+      timing: state.timing,
+      backCount: state.backCount,
       website: hp ? hp.value : ''
     };
     state.view = 'submitting'; render();
