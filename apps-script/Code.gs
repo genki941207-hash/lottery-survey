@@ -9,7 +9,7 @@
  */
 
 // ---------- 設定 ----------
-var API_VERSION = '2026-11-22 一鍵清空版';   // 在瀏覽器打開 API 網址就會顯示，用來確認部署的是不是最新版
+var API_VERSION = '2026-11-22 summary 歸零修正版';   // 在瀏覽器打開 API 網址就會顯示，用來確認部署的是不是最新版
 var SHEET_RESPONSES = 'responses';
 var SHEET_CODEBOOK = 'codebook';
 var SHEET_SUMMARY = 'summary';   // 作答時間摘要（自動更新）
@@ -361,7 +361,10 @@ function updateSpeedFlags_() {
   ensureSpeedRule_(sh, fCol);
 
   var lastRow = sh.getLastRow();
-  if (lastRow < 2) return 0;
+  if (lastRow < 2) {                       // 沒有任何回覆：summary 也要歸零，不能直接結束
+    writeSpeedSummary_([], null, false, 0);
+    return 0;
+  }
 
   var dIdx = header.indexOf('duration_sec');
   var sIdx = header.indexOf('source');
