@@ -9,7 +9,7 @@
  */
 
 // ---------- 設定 ----------
-var API_VERSION = '2026-11-22 金額上限版';   // 在瀏覽器打開 API 網址就會顯示，用來確認部署的是不是最新版
+var API_VERSION = '2026-11-22 欄名檢查修正版';   // 在瀏覽器打開 API 網址就會顯示，用來確認部署的是不是最新版
 var SHEET_RESPONSES = 'responses';
 var SHEET_CODEBOOK = 'codebook';
 var SHEET_SUMMARY = 'summary';   // 作答時間摘要（自動更新）
@@ -502,7 +502,9 @@ function timingSheet_() {
   var ts = ss.getSheetByName(SHEET_TIMING);
   if (ts) {
     var want = timingHeader_();
-    if (ts.getLastColumn() < want.length) {                 // 舊分頁缺新欄位 → 補上欄名
+    var have = ts.getRange(1, 1, 1, want.length).getValues()[0];
+    var mismatch = want.some(function (h, i) { return String(have[i]) !== h; });
+    if (mismatch) {                                         // 欄名缺少或不同 → 只重寫前面這幾格欄名（右邊自己寫的備註不受影響）
       ts.getRange(1, 1, 1, want.length).setValues([want]).setFontWeight('bold');
     }
     ensureTimingRule_(ts);
