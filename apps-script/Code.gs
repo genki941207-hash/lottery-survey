@@ -9,7 +9,7 @@
  */
 
 // ---------- 設定 ----------
-var API_VERSION = '2026-11-23 表單匯入版';   // 在瀏覽器打開 API 網址就會顯示，用來確認部署的是不是最新版
+var API_VERSION = '2026-11-23 自動更新版';   // 在瀏覽器打開 API 網址就會顯示，用來確認部署的是不是最新版
 var SHEET_RESPONSES = 'responses';
 var SHEET_CODEBOOK = 'codebook';
 var SHEET_SUMMARY = 'summary';   // 作答時間摘要（自動更新）
@@ -99,6 +99,7 @@ function setup() {
   sh.getRange(1, 1, sh.getMaxRows(), header.length).setNumberFormat('@');
   ensureSpeedRule_(sh, header.indexOf(SPEED_COLUMN) + 1);
   timingSheet_();
+  ensureChangeTrigger_();
 
   var cb = ss.getSheetByName(SHEET_CODEBOOK) || ss.insertSheet(SHEET_CODEBOOK);
   cb.clear();
@@ -756,4 +757,35 @@ function formatFormTimestamp_(v) {
 // 比對選項時忽略全形半形與空白差異
 function normalizeText_(s) {
   return String(s).normalize('NFKC').replace(/\s+/g, '');
+}
+
+// ============================================================
+// 試算表一有人手動變動（刪列、改資料、貼上）就自動更新
+// ============================================================
+// 由「① 初始化工作表」自動安裝（只會安裝一次）。
+// 網站程式自己寫入的資料不會觸發這個（送出回覆時本來就會更新）。
+function ensureChangeTrigger_() {
+  var exists = ScriptApp.getProjectTriggers().some(function (t) {
+    return t.getHandlerFunction() === 'handleSheetChange';
+  });
+  if (exists) return false;
+  ScriptApp.newTrigger('handleSheetChange')
+    .forSpreadsheet(SpreadsheetApp.getActiveSpreadsheet())
+    .onChange()
+    .create();
+  return true;
+}
+
+// 觸發條件呼叫的函式（名稱不能以底線結尾，否則觸發條件找不到）
+function handleSheetChange(e) {
+  var type = e && e.changeType;
+  if (type && ['EDIT', 'REMOVE_ROW', 'INSERT_ROW', 'OTHER'].indexOf(type) < 0) return; // 只改格式之類的不用重算
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(5000)) return;                 // 短時間內連續變動時，避免同時重算好幾次
+  try {
+    CacheService.getScriptCache().remove('stats'); // 網站統計立刻用最新資料（不用等 60 秒快取）
+    updateSpeedFlags_();                           // 過快標示與 summary 重算
+  } finally {
+    lock.releaseLock();
+  }
 }
