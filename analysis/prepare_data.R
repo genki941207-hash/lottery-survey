@@ -32,7 +32,7 @@ income_levels <- c(
 # ---------- 讀檔與清理 ----------
 df <- read_csv("responses.csv",
                col_types = cols(.default = col_character())) %>%   # 全部先讀成文字，避免「5,000」被當數字
-  filter(source == "web") %>%                 # 排除測試資料（source = test）
+  filter(source %in% c("web", "form")) %>%   # 網站版＋匯入的表單版；排除測試資料（source = test）
   arrange(timestamp) %>%                      # 依時間排序，重複填答時保留第一次
   distinct(client_id, .keep_all = TRUE) %>%   # 同一裝置只留一筆
   mutate(
@@ -65,8 +65,10 @@ if (nrow(bad) > 0) {
 
 # ---------- 輸出成組員模型用的格式 ----------
 raw_df <- df %>%
-  select(id, Q1_choice, Q1_spend, Q2_choice, Q2_spend, stat_edu, risk_love, income)
+  select(id, Q1_choice, Q1_spend, Q2_choice, Q2_spend, stat_edu, risk_love, income,
+         source)   # source：web = 網站版、form = 表單版；建議放進模型當虛擬變數，檢查兩個版本的答案有沒有差異
 
 cat("有效樣本數：", nrow(raw_df), "\n")
 print(count(raw_df, Q1_choice))
 print(count(raw_df, Q2_choice))
+print(count(raw_df, source))

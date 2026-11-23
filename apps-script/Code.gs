@@ -9,7 +9,7 @@
  */
 
 // ---------- 設定 ----------
-var API_VERSION = '2026-11-22 summary 歸零修正版';   // 在瀏覽器打開 API 網址就會顯示，用來確認部署的是不是最新版
+var API_VERSION = '2026-11-23 表單匯入版';   // 在瀏覽器打開 API 網址就會顯示，用來確認部署的是不是最新版
 var SHEET_RESPONSES = 'responses';
 var SHEET_CODEBOOK = 'codebook';
 var SHEET_SUMMARY = 'summary';   // 作答時間摘要（自動更新）
@@ -81,7 +81,9 @@ function onOpen() {
     .addSeparator()
     .addItem('重新標示作答過快', 'updateSpeedFlagsMenu')
     .addSeparator()
-    .addItem('⚠️ 清空所有回覆（正式上線前用）', 'clearAllResponses')
+    .addSeparator()
+    .addItem('匯入表單版資料（放在最上面）', 'importFormData')
+    .addItem('移除表單版資料', 'removeFormData')
     .addToUi();
 }
 
@@ -568,23 +570,190 @@ function timingRow_(body, responseRow) {
     }), [clampNum_(body.inputErrors, 0, 1000)]);
 }
 
-// ---------- 清空所有回覆（保留欄名與設定） ----------
-// responses、timing 兩個分頁的資料列全部刪除，summary 歸零。會先跳出確認視窗。
-function clearAllResponses() {
+
+// ============================================================
+// 匯入表單版資料（Google 表單的回覆試算表 → responses 分頁最上面）
+// ============================================================
+// 表單回覆試算表的 ID（網址 /d/ 與 /edit 之間那段）與分頁名稱
+var FORM_SHEET_ID = '1I8eAMUgOSJcmG6YS8_h-MMCol0dBpYvONdomAVnNaYc';
+var FORM_SHEET_TAB = '表單回覆 1';
+var SHEET_IMPORT_LOG = 'import_log';
+
+// 匯入時自動處理：
+//   ・欄位依「位置」對應（表單第 2～13 欄 = Q1_1～Q9），並檢查欄名開頭題號，對不上就整批中止
+//   ・時間統一成 yyyy-MM-dd HH:mm:ss
+//   ・client_id 依序給 form-001、form-002…；source = form；version = form
+//   ・選項文字逐字比對；只差全形半形或空白時自動校正成標準文字，完全對不上就略過該筆
+//   ・選「不想買」卻填了金額 → 金額改為 0（與網站規則一致）
+//   ・12 題答案完全相同的回覆 → 都保留，但在 import_log 標記「疑似重複」
+//   ・重複匯入不會變兩份：會先移除舊的 form 資料再重新匯入
+// 所有修正與略過都記在 import_log 分頁，原本的表單試算表完全不會被修改。
+function importFormData() {
   var ui = SpreadsheetApp.getUi();
-  var ans = ui.alert('清空所有回覆',
-    '這會刪除 responses 與 timing 分頁的所有資料（包含真實回覆），只保留第一列欄名，而且無法復原。\n\n確定要清空嗎？',
+  var ans = ui.alert('匯入表單版資料',
+    '會讀取表單回覆試算表的所有回覆，轉換格式後放在 responses 分頁最上面（source = form）。\n' +
+    '如果之前匯入過，會先移除舊的表單資料再重新匯入。原本的表單試算表不會被修改。\n\n確定要匯入嗎？',
     ui.ButtonSet.YES_NO);
   if (ans !== ui.Button.YES) return;
 
-  [sheet_(), timingSheet_()].forEach(function (sh) {
-    var rows = sh.getMaxRows(), cols = sh.getMaxColumns();
-    // 清除第 2 列以後所有內容（含備註）。用清除內容而不是刪列：保留文字格式與標色規則，
-    // 也避開「凍結列時不能刪光其他列」的限制。下一筆回覆會自動從第 2 列開始寫。
-    if (rows > 1) sh.getRange(2, 1, rows - 1, cols).clearContent();
+  var result = importFormData_();
+  ui.alert('匯入完成',
+    '匯入 ' + result.imported + ' 筆、略過 ' + result.skipped + ' 筆、自動修正 ' + result.fixed + ' 處、疑似重複 ' + result.dups + ' 組。\n' +
+    '詳細紀錄請看 import_log 分頁。', ui.ButtonSet.OK);
+}
+
+function importFormData_() {
+  var src = SpreadsheetApp.openById(FORM_SHEET_ID);
+  var fs = src.getSheetByName(FORM_SHEET_TAB) || src.getSheets()[0];
+  var values = fs.getDataRange().getValues();
+  if (values.length < 2) throw new Error('表單回覆試算表沒有資料');
+
+  // ---- 欄位檢查：第 2～13 欄的欄名開頭必須是對應題號，避免錯位 ----
+  var fh = values[0];
+  QUESTIONS.forEach(function (q, i) {
+    var h = String(fh[i + 1] || '').trim();
+    if (h.indexOf(q.no + '.') !== 0) {
+      throw new Error('表單第 ' + (i + 2) + ' 欄的欄名是「' + h + '」，預期以「' + q.no + '.」開頭。欄位順序對不上，已中止匯入。');
+    }
   });
+
+  var log = [];
+  var rowsOut = [];
+  var fixed = 0, skipped = 0;
+  var seq = 0;
+
+  values.slice(1).forEach(function (r, k) {
+    if (r.every(function (c) { return c === '' || c === null; })) return;  // 空白列
+    var srcRow = k + 2;
+    var ts = formatFormTimestamp_(r[0]);
+    if (!ts) { skipped++; log.push([srcRow, String(r[0]), '', '略過', '時間戳記無法辨識']); return; }
+
+    var answers = {}, notes = [], bad = '';
+    QUESTIONS.forEach(function (q, i) {
+      if (bad) return;
+      var raw = r[i + 1];
+      if (q.type === 'choice') {
+        var v = String(raw).trim();
+        if (q.options.indexOf(v) >= 0) { answers[q.id] = v; return; }
+        var hit = q.options.filter(function (o) { return normalizeText_(o) === normalizeText_(v); })[0];
+        if (hit) { answers[q.id] = hit; notes.push(q.no + ' 選項文字校正'); fixed++; return; }
+        bad = q.no + ' 選項「' + v + '」對不上任何標準選項';
+      } else {
+        var n = Number(String(raw).replace(/[,，\s元]/g, ''));
+        if (String(raw).trim() === '' || !isFinite(n) || n < 0) { bad = q.no + ' 金額「' + raw + '」不是 0 以上的數字'; return; }
+        if (n > MAX_WTP) { bad = q.no + ' 金額 ' + n + ' 超過上限 ' + MAX_WTP; return; }
+        answers[q.id] = n;
+      }
+    });
+    if (bad) { skipped++; log.push([srcRow, ts, '', '略過', bad]); return; }
+
+    // 選「不想買」卻填了金額 → 金額改 0（網站版選不想買會自動記 0）
+    QUESTIONS.forEach(function (q, i) {
+      var next = QUESTIONS[i + 1];
+      if (q.type === 'choice' && next && next.type === 'number') {
+        if (String(answers[q.id]).indexOf('不想買') >= 0 && answers[next.id] > 0) {
+          notes.push(next.no + ' 選不想買卻填 ' + answers[next.id] + '，改為 0');
+          answers[next.id] = 0;
+          fixed++;
+        }
+      }
+    });
+
+    seq++;
+    var cid = 'form-' + ('00' + seq).slice(-3);
+    rowsOut.push({ ts: ts, cid: cid, answers: answers });
+    log.push([srcRow, ts, cid, notes.length ? '匯入（已修正）' : '匯入', notes.join('；')]);
+  });
+
+  // ---- 疑似重複：12 題答案完全相同 ----
+  var groups = {};
+  rowsOut.forEach(function (o) {
+    var key = QUESTIONS.map(function (q) { return String(o.answers[q.id]); }).join('|');
+    (groups[key] = groups[key] || []).push(o.cid);
+  });
+  var dups = 0;
+  Object.keys(groups).forEach(function (key) {
+    var ids = groups[key];
+    if (ids.length < 2) return;
+    dups++;
+    log.forEach(function (l) {
+      if (ids.indexOf(l[2]) >= 0) l[4] = (l[4] ? l[4] + '；' : '') + '疑似重複（12 題答案與 ' + ids.filter(function (x) { return x !== l[2]; }).join('、') + ' 完全相同）';
+    });
+  });
+
+  // ---- 寫入 responses：先移除舊的 form 資料，再插入到最上面 ----
+  var sh = sheet_();
+  removeFormRows_(sh);
+  var header = sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0];
+  var out = rowsOut.map(function (o) {
+    return header.map(function (h) {
+      if (h === 'timestamp') return o.ts;
+      if (h === 'client_id') return o.cid;
+      if (h === 'source') return 'form';
+      if (h === 'version') return 'form';
+      if (o.answers.hasOwnProperty(h)) return String(o.answers[h]);
+      return '';                                   // duration_sec、speed_flag 等表單沒有的欄位留空
+    });
+  });
+  if (out.length) {
+    sh.insertRowsBefore(2, out.length);
+    var rng = sh.getRange(2, 1, out.length, header.length);
+    rng.setNumberFormat('@').setFontWeight('normal');   // 新插入的列不要沿用標題列的粗體
+    rng.setValues(out);
+  }
+
+  // ---- 匯入紀錄 ----
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var lg = ss.getSheetByName(SHEET_IMPORT_LOG) || ss.insertSheet(SHEET_IMPORT_LOG);
+  lg.clear();
+  var head = [['表單試算表列號', '時間', '指派的 client_id', '動作', '說明']];
+  var summaryRow = [['', Utilities.formatDate(new Date(), 'Asia/Taipei', 'yyyy-MM-dd HH:mm:ss'), '', '匯入摘要',
+    '匯入 ' + out.length + ' 筆、略過 ' + skipped + ' 筆、自動修正 ' + fixed + ' 處、疑似重複 ' + dups + ' 組']];
+  var all = head.concat(summaryRow, log);
+  lg.getRange(1, 1, all.length, 5).setValues(all);
+  lg.getRange(1, 1, 1, 5).setFontWeight('bold');
+  lg.setFrozenRows(1);
 
   CacheService.getScriptCache().remove('stats');
   updateSpeedFlags_();
-  ui.alert('已清空，網站上的人數約 1 分鐘內會歸零。');
+  return { imported: out.length, skipped: skipped, fixed: fixed, dups: dups };
+}
+
+// 撤銷：移除 responses 分頁中所有 source = form 的列
+function removeFormData() {
+  var ui = SpreadsheetApp.getUi();
+  if (ui.alert('移除表單版資料', '會刪除 responses 分頁中所有 source = form 的列（網站資料不受影響）。確定嗎？', ui.ButtonSet.YES_NO) !== ui.Button.YES) return;
+  var n = removeFormRows_(sheet_());
+  CacheService.getScriptCache().remove('stats');
+  updateSpeedFlags_();
+  ui.alert('已移除 ' + n + ' 筆表單版資料。');
+}
+
+function removeFormRows_(sh) {
+  var vals = sh.getDataRange().getValues();
+  var sIdx = vals[0].indexOf('source');
+  var n = 0;
+  for (var i = vals.length - 1; i >= 1; i--) {
+    if (vals[i][sIdx] === 'form') { sh.deleteRow(i + 1); n++; }
+  }
+  return n;
+}
+
+// 表單的時間戳記：通常是日期物件；若是文字（例如「2026/11/17 下午 9:58:59」）也能轉換
+function formatFormTimestamp_(v) {
+  if (Object.prototype.toString.call(v) === '[object Date]' && !isNaN(v.getTime())) {
+    return Utilities.formatDate(v, 'Asia/Taipei', 'yyyy-MM-dd HH:mm:ss');
+  }
+  var m = String(v).trim().match(/^(\d{4})[\/-](\d{1,2})[\/-](\d{1,2})\s*(上午|下午)?\s*(\d{1,2}):(\d{2}):(\d{2})$/);
+  if (!m) return '';
+  var h = Number(m[5]);
+  if (m[4] === '下午' && h < 12) h += 12;
+  if (m[4] === '上午' && h === 12) h = 0;
+  function p(x) { return ('0' + x).slice(-2); }
+  return m[1] + '-' + p(m[2]) + '-' + p(m[3]) + ' ' + p(h) + ':' + m[6] + ':' + m[7];
+}
+
+// 比對選項時忽略全形半形與空白差異
+function normalizeText_(s) {
+  return String(s).normalize('NFKC').replace(/\s+/g, '');
 }
