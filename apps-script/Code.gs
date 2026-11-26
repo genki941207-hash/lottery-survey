@@ -9,7 +9,7 @@
  */
 
 // ---------- 設定 ----------
-var API_VERSION = '2026-11-23 自動更新版';   // 在瀏覽器打開 API 網址就會顯示，用來確認部署的是不是最新版
+var API_VERSION = '2026-11-26 秒數圖表版';   // 在瀏覽器打開 API 網址就會顯示，用來確認部署的是不是最新版
 var SHEET_RESPONSES = 'responses';
 var SHEET_CODEBOOK = 'codebook';
 var SHEET_SUMMARY = 'summary';   // 作答時間摘要（自動更新）
@@ -80,6 +80,7 @@ function onOpen() {
     .addItem('刪除測試資料', 'deleteTestData')
     .addSeparator()
     .addItem('重新標示作答過快', 'updateSpeedFlagsMenu')
+    .addItem('建立／重建作答秒數圖表', 'buildTimingCharts')
     .addSeparator()
     .addSeparator()
     .addItem('匯入表單版資料（放在最上面）', 'importFormData')
@@ -788,4 +789,93 @@ function handleSheetChange(e) {
   } finally {
     lock.releaseLock();
   }
+}
+
+// ============================================================
+// 作答秒數圖表（timing_charts 分頁）
+// ============================================================
+// 每一題一張長條圖：橫軸是秒數區間、縱軸是人數。
+// 計數表用 COUNTIFS 公式直接讀 timing 分頁，所以有新回覆時表格與圖表會自動更新，
+// 這個功能只需要執行一次（之後想重排版面再執行即可，會先刪掉舊圖表）。
+// 測試資料（source = test）不計入；空白（被跳過的金額題）也不計入。
+var SHEET_TIMING_CHARTS = 'timing_charts';
+var TIMING_BINS = [   // [標籤, 下限(含), 上限(不含)]
+  ['0–2 秒', 0, 2], ['2–4 秒', 2, 4], ['4–6 秒', 4, 6], ['6–8 秒', 6, 8], ['8–10 秒', 8, 10],
+  ['10–15 秒', 10, 15], ['15–20 秒', 15, 20], ['20–30 秒', 20, 30], ['30–60 秒', 30, 60], ['60 秒以上', 60, '']
+];
+
+function buildTimingCharts() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var ts = timingSheet_();
+  var th = ts.getRange(1, 1, 1, ts.getLastColumn()).getValues()[0];
+  var srcLetter = columnLetter_(th.indexOf('source') + 1);
+
+  var cs = ss.getSheetByName(SHEET_TIMING_CHARTS);
+  if (!cs) {
+    cs = ss.insertSheet(SHEET_TIMING_CHARTS, ss.getSheets().indexOf(ts) + 1);   // 放在 timing 分頁右邊
+  }
+  cs.getCharts().forEach(function (c) { cs.removeChart(c); });
+  cs.clear();
+
+  // ---- 標題與說明 ----
+  cs.getRange('A1').setValue('各題作答秒數分布（人數）').setFontWeight('bold').setFontSize(13);
+  cs.getRange('A2').setValue('資料來源：timing 分頁（不含測試資料；被跳過的金額題不計入）。表格與圖表會隨新回覆自動更新。')
+    .setFontColor('#6b7080');
+
+  // ---- 計數表 ----
+  var startRow = 4;
+  var header = ['秒數區間', '下限', '上限'].concat(QUESTIONS.map(function (q) { return q.no + ' 題'; }));
+  cs.getRange(startRow, 1, 1, header.length).setValues([header]).setFontWeight('bold');
+
+  var rows = TIMING_BINS.map(function (b, i) {
+    var r = startRow + 1 + i;
+    return [b[0], b[1], b[2]].concat(QUESTIONS.map(function (q) {
+      var col = columnLetter_(th.indexOf('T_' + q.id) + 1);
+      var rng = 'timing!' + col + '$2:' + col;
+      var notTest = 'timing!' + srcLetter + '$2:' + srcLetter + ',"<>test"';
+      var lower = rng + ',">="&$B' + r;
+      var upper = b[2] === '' ? '' : ',' + rng + ',"<"&$C' + r;
+      return '=COUNTIFS(' + lower + upper + ',' + notTest + ')';
+    }));
+  });
+  cs.getRange(startRow + 1, 1, rows.length, header.length).setValues(rows);
+
+  // 合計與中位數
+  var sumRow = startRow + 1 + rows.length;
+  var sumVals = [['有秒數的人數', '', ''].concat(QUESTIONS.map(function (q, i) {
+    var L = columnLetter_(4 + i);
+    return '=SUM(' + L + (startRow + 1) + ':' + L + (sumRow - 1) + ')';
+  })), ['中位數（秒）', '', ''].concat(QUESTIONS.map(function (q) {
+    var col = columnLetter_(th.indexOf('T_' + q.id) + 1);
+    return '=IFERROR(ROUND(MEDIAN(FILTER(timing!' + col + '$2:' + col + ',timing!' + srcLetter + '$2:' + srcLetter + '<>"test",ISNUMBER(timing!' + col + '$2:' + col + '))),1),"—")';
+  }))];
+  cs.getRange(sumRow, 1, 2, header.length).setValues(sumVals).setFontWeight('bold');
+  cs.setFrozenRows(startRow);
+  cs.setColumnWidth(1, 110);
+  cs.hideColumns(2, 2);   // 下限、上限只給公式用，隱藏起來
+
+  // ---- 每題一張長條圖（每列 3 張） ----
+  var chartTop = sumRow + 3;
+  var labelRange = cs.getRange(startRow + 1, 1, rows.length, 1);
+  QUESTIONS.forEach(function (q, i) {
+    var dataRange = cs.getRange(startRow + 1, 4 + i, rows.length, 1);
+    var row = chartTop + Math.floor(i / 3) * 16;
+    var col = 1 + (i % 3) * 5;
+    var chart = cs.newChart()
+      .asColumnChart()
+      .addRange(labelRange)
+      .addRange(dataRange)
+      .setPosition(row, col, 0, 0)
+      .setOption('title', q.no + ' 題：作答秒數分布')
+      .setOption('legend', { position: 'none' })
+      .setOption('colors', ['#4f73b3'])
+      .setOption('hAxis', { title: '秒數區間', slantedText: true, slantedTextAngle: 45 })
+      .setOption('vAxis', { title: '人數', minValue: 0, format: '0' })
+      .setOption('width', 420)
+      .setOption('height', 300)
+      .build();
+    cs.insertChart(chart);
+  });
+
+  ss.toast('已建立 ' + QUESTIONS.length + ' 張作答秒數圖表', '彩券問卷', 5);
 }
